@@ -47,44 +47,47 @@ pub enum UnicodeCompat {
     Unicode14,
 }
 
-/// Utility functions that computes the width of a string by performing graphming
-/// segementation and summing the widths computed by [`grapheme_width`].
-#[cfg(feature = "segmentation")]
+/// Computes the width of a string
 #[inline]
 pub fn str_width(s: &str, unicode_compact: UnicodeCompat) -> usize {
-    unicode_segmentation::UnicodeSegmentation::graphemes(s, false)
-        .map(|g| grapheme_width(g, unicode_compact))
-        .sum()
-}
+    let mut chars = s.chars();
+    match unicode_compact {
+        UnicodeCompat::Unicode9 => chars.map(char_width_unicode9).sum(),
+        UnicodeCompat::Unicode14 => {
+            let mut res = 0;
+            while let Some(c) = chars.next() {
+                println!("{c:?}");
+                if c.is_ascii() {
+                    res += (!(c as u8).is_ascii_control()) as usize;
+                    continue;
+                }
+                // For unicode 14 respect emoji-variations.txt
+                // If there is no explicit variant select then the default width algorithm always
+                // returns the width for the default presentation so no need to specical case
+                if EMOJI_VARIATIONS.contains_char(c) {
+                    match chars.as_str().as_bytes() {
+                        // text variant select U-FE0E as bytes
+                        [0xef, 0xb8, 0x8e, ..] => {
+                            chars = chars.as_str()[3..].chars();
+                            res += 1;
+                            continue;
+                        }
+                        // emoji variant select U-FE0F as bytes
+                        [0xef, 0xb8, 0x8f, ..] => {
+                            chars = chars.as_str()[3..].chars();
+                            res += 2;
+                            continue;
+                        }
+                        _ => (),
+                    }
+                }
 
-/// Computes the number of columns ocupied by a [unicode grapheme](https://unicode.org/reports/tr29/).
-/// Always returns an integer in the range `0..=2`.
-#[inline]
-pub fn grapheme_width(grapheme: &str, unicode_compact: UnicodeCompat) -> usize {
-    // Optimization: if there is a single byte we can directly cast
-    // that byte as a char which will be in the range 0..128 aka
-    // ASCII which can be specical cased
-    if let &[b] = grapheme.as_bytes() {
-        return (!b.is_ascii_control()) as usize;
+                let width = lookup_width(c) as usize;
+                res += width;
+            }
+            res
+        }
     }
-
-    non_ascii_grapheme_width(grapheme, unicode_compact)
-}
-
-/// Computes the number of columns ocupied by a [unicode grapheme](https://unicode.org/reports/tr29/).
-/// For zero width graphemes this funciton return `1`. This is useful for editors
-/// which always want to ensure that every grapheme is selectable/editable.
-/// Always returns an integer in the range `1..=2`.
-///
-/// This function is equivalent to `grapheme_width(grapheme, unicode_compact).max(1)`.
-/// However it contains a specical fast path for ASCII that makes it a lot faster in that (very common) case.
-#[inline]
-pub fn grapheme_width_non_zero(grapheme: &str, unicode_compact: UnicodeCompat) -> usize {
-    // performance hack: all sinlge byte chars have a width of 0 or 1 which gets increased to 1 her
-    if grapheme.len() == 1 {
-        return 1;
-    }
-    non_ascii_grapheme_width(grapheme, unicode_compact).max(1)
 }
 
 #[inline]
@@ -109,31 +112,37 @@ fn lookup_width(c: char) -> u8 {
     packed_widths >> (2 * (cp & 0b11)) & 0b11
 }
 
+/// Calculates the width of a single character. This never takes text represeentation
+/// into account and therefore implies `UnicodeCompat::Unicode9`. For non-emoji
+/// characters this is equivalent to [`char_width_unicode14`].
 #[inline]
-fn non_ascii_grapheme_width(s: &str, unicode_compat: UnicodeCompat) -> usize {
-    let mut chars = s.chars();
-    let c = if let Some(c) = chars.next() {
-        c
-    } else {
-        return 0;
-    };
+pub fn char_width_unicode9(c: char) -> usize {
+    if c.is_ascii() {
+        return (!(c as u8).is_ascii_control()) as usize;
+    }
+    lookup_width(c) as usize
+}
 
+/// Calculates the width of a single character that is followed by a text
+/// representation character. This never takes text represeentation into account
+/// and therefore implies `UnicodeCompat::Unicode14`. For non-emoji
+/// characters this is equivalent to [`char_width_unicode9`].
+#[inline]
+pub fn char_width_unicode14(c: char, rem: &str) -> usize {
+    if c.is_ascii() {
+        return (!(c as u8).is_ascii_control()) as usize;
+    }
     // For unicode 14 respect emoji-variations.txt
     // If there is no explicit variant select then the default width algorithm always
     // returns the width for the default presentation so no need to specical case
-    if unicode_compat >= UnicodeCompat::Unicode14 && EMOJI_VARIATIONS.contains_char(c) {
-        match chars.as_str().as_bytes() {
+    if EMOJI_VARIATIONS.contains_char(c) {
+        match rem.as_bytes() {
             // text variant select U-FE0E as bytes
-            [0xef, 0xb8, 0x8e] => return 1,
+            [0xef, 0xb8, 0x8e, ..] => return 1,
             // emoji variant select U-FE0F as bytes
-            [0xef, 0xb8, 0x8f] => return 2,
+            [0xef, 0xb8, 0x8f, ..] => return 2,
             _ => (),
         }
     }
-
-    let mut width = lookup_width(c);
-    for c in chars {
-        width += lookup_width(c);
-    }
-    (width as usize).min(2)
+    lookup_width(c) as usize
 }
